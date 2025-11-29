@@ -1,140 +1,118 @@
-PCA9685 I2C Driver for STM32
+PCA9685 I2C Driver
 
-A lightweight, portable, and robust C library for the NXP PCA9685 16-channel, 12-bit PWM FM+ I2C-bus LED controller.
+A lightweight, platform-agnostic C driver for the NXP PCA9685 16-channel, 12-bit PWM I2C bus controller.
 
-While this library includes a ready-made Hardware Abstraction Layer (HAL) for STM32 (using the standard STM32 HAL), the core logic is hardware-agnostic and can be easily ported to other platforms (ESP32, AVR, PIC, etc.) by modifying the HAL file.
+Designed for modularity, this library separates the core logic from the hardware layer, making it easy to use with STM32 (out of the box) or port to any other architecture (AVR, ESP32, PIC, etc.) by simply replacing the HAL file.
 
-⚡ Features
+📋 Features
 
-    Complete Control: Full access to all 16 PWM channels.
+Full Control: Access to Mode 1 & 2 registers, Sub-Addresses, and All-Call functionality.
 
-    Precision: Set Duty Cycle and Phase Delay using percentage (0.0% - 100.0%).
+Precision PWM: Helper functions to set Duty Cycle and Phase Delay in percentages (0.0 - 100.0%).
 
-    Group Control: Set PWM or ON/OFF states for all LEDs simultaneously.
+Frequency Control: Easy configuration of the PRE_SCALE register (e.g., setting 50Hz for servos).
 
-    Frequency Management: Easy API to read/write the prescaler to set PWM frequency (e.g., 50Hz for Servos).
+Power Management: Sleep, Wake, and Restart sequence implementation.
 
-    Power Management: Sleep mode and Restart logic implementation.
+Hardware Abstraction Layer (HAL): Clean separation between driver logic and I2C hardware calls.
 
-    Output Configuration: Support for Open-Drain/Totem-Pole and Inverted logic.
+STM32 Ready: Includes a default HAL implementation for STM32 using the HAL Library (hi2c1).
 
-    Addressing: Full support for Sub-Addresses and All Call I2C addresses for daisy-chaining.
+📂 File Structure
 
-📂 Project Structure
+File
 
-Plaintext
+Description
 
-.
-├── LICENSE                 # MIT License
-├── README.md               # Documentation
-├── pca9685_i2c.c           # Core Driver Logic (Hardware Agnostic)
-├── pca9685_i2c.h           # Core Definitions & API
-├── pca9685_i2c_hal.c       # Hardware Implementation (STM32 HAL)
-└── pca9685_i2c_hal.h       # HAL Function Prototypes
+pca9685_i2c.c
 
-🛠 Integration
+Core driver implementation. Platform independent.
 
-    Copy Files: Copy the .c files to your project's Src folder and .h files to your Inc folder.
+pca9685_i2c.h
 
-    Include Header: Add #include "pca9685_i2c.h" to your main.c.
+Main header file. Includes struct definitions and API prototypes.
 
-    STM32 Configuration:
+pca9685_i2c_hal.c
 
-        Ensure your I2C peripheral is initialized in CubeMX.
+Hardware Abstraction Layer. Currently implements STM32 I2C.
 
-        This driver assumes hi2c1 is the handle. If you use a different instance (e.g., hi2c2), update the extern declaration in pca9685_i2c_hal.c.
+pca9685_i2c_hal.h
 
-💻 Usage Examples
+HAL Header. Defines the interface required by the core driver.
 
-1. Initialization
+🚀 Getting Started (STM32)
 
-Initialize the device struct and register the I2C address.
-C
+This driver comes pre-configured for STM32 using the standard HAL library.
+
+Add Files: Copy the .c and .h files into your project source/include directories.
+
+Setup I2C: Ensure your I2C peripheral is initialized in main.c (usually done automatically by CubeMX).
+
+Check Handle: The driver assumes your I2C handle is named hi2c1. If yours is different (e.g., hi2c2), update the extern declaration in pca9685_i2c_hal.c.
+
+Example Usage
+
+Here is a quick example of initializing the driver, setting the frequency to 50Hz (standard for servos), and moving a servo on Channel 0.
 
 #include "pca9685_i2c.h"
 
-// Define the device handle
-pca9685_dev_t pca_dev;
+// Device handle
+pca9685_dev_t pca9685;
 
-void user_pca_init() {
-    // 1. Initialize the low-level HAL (checks I2C handle)
-    if (pca9685_i2c_hal_init() != PCA9685_OK) {
-        // Handle Error
-    }
+void setup_pca9685(void) {
+    // 1. Initialize the HAL (if needed)
+    pca9685_i2c_hal_init();
 
-    // 2. Register the device
-    // Params: Device Struct, I2C Addr, AllCall Addr, SubAddr1, SubAddr2, SubAddr3
-    pca9685_i2c_register(&pca_dev, I2C_ADDRESS_PCA9685, I2C_ALL_CALL_ADDRESS_PCA9685, 
-                         I2C_SUB_ADDRESS_1_PCA9685, I2C_SUB_ADDRESS_2_PCA9685, I2C_SUB_ADDRESS_3_PCA9685);
+    // 2. Register device with default addresses
+    // (I2C Address: 0x40, AllCall: 0x70, Sub1: 0x71, Sub2: 0x72, Sub3: 0x74)
+    pca9685_i2c_register(&pca9685, I2C_ADDRESS_PCA9685, 
+                                   I2C_ALL_CALL_ADDRESS_PCA9685,
+                                   I2C_SUB_ADDRESS_1_PCA9685,
+                                   I2C_SUB_ADDRESS_2_PCA9685,
+                                   I2C_SUB_ADDRESS_3_PCA9685);
 
     // 3. Reset the device to default state
     pca9685_i2c_reset();
+
+    // 4. Set Output Frequency to 50Hz
+    // Note: You must sleep the oscillator to change the prescaler
+    pca9685_i2c_sleep_mode(pca9685, PCA9685_MODE_SLEEP);
+    pca9685_i2c_write_pre_scale(pca9685, 50.0, 25000000); // 25MHz internal clock
+    pca9685_i2c_sleep_mode(pca9685, PCA9685_MODE_NORMAL);
+
+    // 5. Wake up and restart
+    pca9685_i2c_restart(pca9685);
     
-    // 4. Configure Output Driver (optional, defaults are usually fine)
-    pca9685_output_t out_conf = {
+    // 6. Configure Output Structure (Totem Pole, Not Inverted)
+    pca9685_output_t output_conf = {
         .outdrv = PCA9685_OUTPUT_TOTEM_POLE,
         .outne  = PCA9685_OUTPUT_LOW,
         .och    = PCA9685_CH_ONSTOP,
         .invrt  = PCA9685_OUTPUT_NOTINVERT
     };
-    pca9685_i2c_output_init(pca_dev, out_conf);
-    
-    // 5. Enable Auto-Increment (Recommended for block writes)
-    pca9685_i2c_autoincrement(pca_dev, PCA9685_AUTOINCR_ON);
+    pca9685_i2c_output_init(pca9685, output_conf);
 }
 
-2. Setting PWM Frequency (e.g., 50Hz for Servos)
-
-The PCA9685 must be in sleep mode to change the prescaler.
-C
-
-void set_frequency_50hz() {
-    // Put device to sleep
-    pca9685_i2c_sleep_mode(pca_dev, PCA9685_MODE_SLEEP);
-
-    // Set Prescaler for 50Hz (using internal 25MHz clock)
-    pca9685_i2c_write_pre_scale(pca_dev, 50.0, 25000000.0);
-
-    // Wake up
-    pca9685_i2c_sleep_mode(pca_dev, PCA9685_MODE_NORMAL);
-    
-    // Restart to resume PWM
-    pca9685_i2c_restart(pca_dev);
+void set_servo_position(void) {
+    // Set Channel 0 to ~7.5% duty cycle (1.5ms pulse for neutral servo position)
+    pca9685_i2c_led_pwm_set(pca9685, 0, 7.5, 0.0);
 }
 
-3. Controlling Channels
 
-You can set channels individually or all at once. Values are in percentages (0.0 to 100.0).
-C
+🔌 Porting to Other Platforms
 
-void control_leds() {
-    // Set Channel 0 to 50% Duty Cycle, 0% Delay
-    pca9685_i2c_led_pwm_set(pca_dev, 0, 50.0f, 0.0f);
+To use this driver on Arduino, ESP32, or other microcontrollers, you only need to modify pca9685_i2c_hal.c.
 
-    // Set Channel 1 to 25% Duty Cycle, 10% Phase Delay
-    pca9685_i2c_led_pwm_set(pca_dev, 1, 25.0f, 10.0f);
+Implement the following 4 functions inside pca9685_i2c_hal.c using your platform's I2C API:
 
-    // Turn Channel 2 Fully ON (No PWM)
-    pca9685_i2c_led_set(pca_dev, 2, PCA9685_LED_ON);
+pca9685_i2c_hal_init(): Initialize I2C hardware.
 
-    // Turn ALL Channels OFF
-    pca9685_i2c_all_led_set(pca_dev, PCA9685_LED_OFF);
-}
+pca9685_i2c_hal_read(...): Read count bytes from a specific register.
 
-🔄 Porting to other platforms
+pca9685_i2c_hal_write(...): Write count bytes (the first byte is usually the register address).
 
-To use this library on platforms other than STM32 (e.g., ESP32, Arduino, AVR):
+pca9685_i2c_hal_ms_delay(...): Millisecond delay function.
 
-    Keep pca9685_i2c.c and pca9685_i2c.h exactly as they are.
-
-    Modify pca9685_i2c_hal.c:
-
-        Update pca9685_i2c_hal_init() to initialize your specific I2C hardware.
-
-        Replace HAL_I2C_Master_Transmit and HAL_I2C_Master_Receive inside pca9685_i2c_hal_write and read with your platform's I2C functions.
-
-        Update pca9685_i2c_hal_ms_delay with your platform's delay function (e.g., vTaskDelay for FreeRTOS).
-        
 MIT License
 
 Copyright (c) 2025 loed811
