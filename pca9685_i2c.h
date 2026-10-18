@@ -152,6 +152,32 @@ typedef struct{
 #define STAB_TIME                       1      /**< Oscillator stabilization wait time (ms) */
 #define PWM_OUTPUT_COUNTER_MAX          0x1000 /**< 12-bit counter max (4096 steps) */
 
+/**
+ * @brief MODE1 register bits (handy when decoding pca9685_i2c_read_mode_1()).
+ */
+#define PCA9685_MODE1_RESTART           0x80 /**< Restart pending / write 1 to restart PWM */
+#define PCA9685_MODE1_EXTCLK            0x40 /**< External clock selected */
+#define PCA9685_MODE1_AI                0x20 /**< Register auto-increment */
+#define PCA9685_MODE1_SLEEP             0x10 /**< Low power mode, oscillator off */
+#define PCA9685_MODE1_SUB1              0x08 /**< Responds to sub-address 1 */
+#define PCA9685_MODE1_SUB2              0x04 /**< Responds to sub-address 2 */
+#define PCA9685_MODE1_SUB3              0x02 /**< Responds to sub-address 3 */
+#define PCA9685_MODE1_ALLCALL           0x01 /**< Responds to the All Call address */
+
+/**
+ * @brief MODE2 register bits.
+ */
+#define PCA9685_MODE2_INVRT             0x10 /**< Output logic inverted */
+#define PCA9685_MODE2_OCH               0x08 /**< Outputs change on ACK instead of STOP */
+#define PCA9685_MODE2_OUTDRV            0x04 /**< Totem-pole outputs (otherwise open-drain) */
+#define PCA9685_MODE2_OUTNE_MASK        0x03 /**< Output state while OE = 1 */
+
+/**
+ * @brief Full ON / full OFF flag: bit 4 of LEDn_ON_H / LEDn_OFF_H,
+ * i.e. bit 12 of the 16-bit ON or OFF value.
+ */
+#define PCA9685_LED_FULL                0x1000
+
 /* -------------------------------------------------------------------------- */
 /* Function Prototypes                          */
 /* -------------------------------------------------------------------------- */
@@ -174,6 +200,13 @@ int16_t pca9685_i2c_read_mode_2(pca9685_dev_t dev, uint8_t *mode);
 
 /**
  * @brief Configures the clock source (Internal vs External).
+ *
+ * PCA9685_CLK_EXTERNAL follows the datasheet sequence: the SLEEP bit is set
+ * first, then SLEEP and EXTCLK are written together. The device is left
+ * asleep, so set PRE_SCALE and call pca9685_i2c_sleep_mode(NORMAL) and
+ * pca9685_i2c_restart() afterwards. EXTCLK is sticky: only a power cycle or
+ * pca9685_i2c_reset() switches back to the internal oscillator, so
+ * PCA9685_CLK_INTERNAL has no effect once the external clock is selected.
  * @param dev The device structure.
  * @param clk The clock source selection.
  * @return PCA9685_OK on success.
@@ -190,6 +223,9 @@ int16_t pca9685_i2c_autoincrement(pca9685_dev_t dev, pca9685_auto_incr_t setting
 
 /**
  * @brief Performs a Restart sequence to wake the device and resume PWM.
+ *
+ * Clears SLEEP, waits for the oscillator to stabilise, then writes 1 to the
+ * RESTART bit so channels that were running before sleep resume.
  * @param dev The device structure.
  * @return PCA9685_OK on success.
  */
@@ -197,6 +233,9 @@ int16_t pca9685_i2c_restart(pca9685_dev_t dev);
 
 /**
  * @brief Controls the Sleep Mode of the device.
+ *
+ * Waking up waits STAB_TIME ms for the oscillator. A pending RESTART bit is
+ * left untouched, so call pca9685_i2c_restart() afterwards to resume PWM.
  * @param dev The device structure.
  * @param sleep_mode Enable (Sleep) or Disable (Normal Mode).
  * @return PCA9685_OK on success.
@@ -207,7 +246,7 @@ int16_t pca9685_i2c_sleep_mode(pca9685_dev_t dev, pca9685_sleep_mode_t sleep_mod
  * @brief Resets the device via I2C Software Reset (SWRST).
  * @return PCA9685_OK on success.
  */
-int16_t pca9685_i2c_reset();
+int16_t pca9685_i2c_reset(void);
 
 /**
  * @brief Initializes the Output configuration (MODE2 register).
@@ -236,16 +275,25 @@ int16_t pca9685_i2c_all_led_set(pca9685_dev_t dev, pca9685_led_state_t state);
 
 /**
  * @brief Sets PWM parameters for a specific LED channel.
+ *
+ * The output goes high @p delay percent into the period and stays high for
+ * @p d_cycle percent of it. Both values are clamped to 0..100 (NaN counts as
+ * 0). A duty cycle that rounds to 0 counts uses the full OFF bit and one that
+ * reaches 4096 counts uses the full ON bit, so 0 % and 100 % are exact. If
+ * d_cycle + delay exceeds 100, the pulse wraps into the start of the next
+ * period, which the chip supports.
  * @param dev The device structure.
  * @param led_no The LED channel number (0-15).
  * @param d_cycle Duty cycle percentage (0-100).
  * @param delay Phase delay percentage (0-100).
- * @return PCA9685_OK on success.
+ * @return PCA9685_OK on success, PCA9685_ERR if led_no > 15 or I2C fails.
  */
 int16_t pca9685_i2c_led_pwm_set(pca9685_dev_t dev, uint8_t led_no, float d_cycle, float delay);
 
 /**
  * @brief Sets PWM parameters for ALL LED channels.
+ *
+ * Same rules as pca9685_i2c_led_pwm_set(), written to the ALL_LED registers.
  * @param dev The device structure.
  * @param d_cycle Duty cycle percentage (0-100).
  * @param delay Phase delay percentage (0-100).
@@ -255,18 +303,24 @@ int16_t pca9685_i2c_all_led_pwm_set(pca9685_dev_t dev, float d_cycle, float dela
 
 /**
  * @brief Calculates and writes the Pre-scale value for a target frequency.
- * @note Device must be in SLEEP mode before calling this.
+ *
+ * PRE_SCALE = round(osc_clk_hz / (4096 * frequency)) - 1, clamped to the
+ * hardware range 3..255.
+ * @note Device must be in SLEEP mode before calling this: the chip ignores
+ *       PRE_SCALE writes while the oscillator is running.
  * @param dev The device structure.
  * @param frequency Target frequency in Hz (e.g., 50.0).
  * @param osc_clk_hz Oscillator frequency (internal is ~25MHz).
- * @return PCA9685_OK on success.
+ * @return PCA9685_OK on success, PCA9685_ERR if frequency or osc_clk_hz
+ *         is not a positive number, or I2C fails.
  */
 int16_t pca9685_i2c_write_pre_scale(pca9685_dev_t dev, double frequency, double osc_clk_hz);
 
 /**
  * @brief Reads the Pre-scale register and calculates the actual frequency.
  * @param dev The device structure.
- * @param frequency Pointer to store the calculated frequency.
+ * @param frequency Pointer to store the calculated frequency (left
+ *        unchanged if the read fails).
  * @param osc_clk_hz Oscillator frequency.
  * @return PCA9685_OK on success.
  */
@@ -332,8 +386,11 @@ int16_t pca9685_i2c_allcall_address_resp(pca9685_dev_t dev, pca9685_addr_resp_t 
  * @param _sub_addr_1 Sub-Address 1 to set.
  * @param _sub_addr_2 Sub-Address 2 to set.
  * @param _sub_addr_3 Sub-Address 3 to set.
+ * @return PCA9685_OK on success, PCA9685_ERR if dev is NULL, an address
+ *         does not fit in 7 bits, or I2C fails. The structure is filled in
+ *         either way when dev is not NULL.
  */
-void pca9685_i2c_register(pca9685_dev_t *dev,
+int16_t pca9685_i2c_register(pca9685_dev_t *dev,
                           uint8_t _i2c_addr,
                           uint8_t _allcall_addr,
                           uint8_t _sub_addr_1,

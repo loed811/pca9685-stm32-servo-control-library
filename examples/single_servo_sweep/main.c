@@ -44,12 +44,12 @@ static int16_t pca9685_servo_init(void)
      * any address configuration written by pca9685_i2c_register(). */
     err |= pca9685_i2c_reset();
 
-    pca9685_i2c_register(&pca9685,
-                         I2C_ADDRESS_PCA9685,
-                         I2C_ALL_CALL_ADDRESS_PCA9685,
-                         I2C_SUB_ADDRESS_1_PCA9685,
-                         I2C_SUB_ADDRESS_2_PCA9685,
-                         I2C_SUB_ADDRESS_3_PCA9685);
+    err |= pca9685_i2c_register(&pca9685,
+                                I2C_ADDRESS_PCA9685,
+                                I2C_ALL_CALL_ADDRESS_PCA9685,
+                                I2C_SUB_ADDRESS_1_PCA9685,
+                                I2C_SUB_ADDRESS_2_PCA9685,
+                                I2C_SUB_ADDRESS_3_PCA9685);
 
     /* Required: pca9685_i2c_led_pwm_set() writes 4 registers in one
      * transfer, which only works with register auto-increment enabled. */
