@@ -94,13 +94,13 @@ int16_t pca9685_i2c_restart(pca9685_dev_t dev)
     uint8_t mode;
 
     /* Read MODE1. Check if RESTART bit (bit 7) is set, implying a restart is pending/possible. */
-    if(pca9685_i2c_read_mode_1(dev, &mode) != PCA9685_OK && !(mode & (1 << 7)))
+    if(pca9685_i2c_read_mode_1(dev, &mode) != PCA9685_OK)
         return PCA9685_ERR;
 
     uint8_t data[2];
     data[0] = reg;
     /* Clear the SLEEP bit (bit 4) to wake up the device */
-    data[1] = mode | (mode & ~(1 << 4));
+    data[1] = mode & ~(1 << 4);
     int16_t err = pca9685_i2c_hal_write(dev.i2c_addr, data, 2);
 
     /* Wait for oscillator to stabilize (typically 500us) */
@@ -111,7 +111,7 @@ int16_t pca9685_i2c_restart(pca9685_dev_t dev)
         return PCA9685_ERR;
 
     /* Write logic 1 to bit 7 to restart PWM channels */
-    data[1] = mode | (mode & (1 << 7));
+    data[1] = mode | (1 << 7);
     err += pca9685_i2c_hal_write(dev.i2c_addr, data, 2);
 
     return err;
@@ -180,7 +180,7 @@ int16_t pca9685_i2c_output_init(pca9685_dev_t dev, pca9685_output_t output)
     data[0] = reg;
     /* Clear lower 5 bits (0xE0) and apply new configuration */
     /* Bit 4: INVRT, Bit 3: OCH, Bit 2: OUTDRV, Bit 1-0: OUTNE */
-    data[1] = (mode & 0xE0) | (output.invrt << 4) | (output.och << 3) | (output.outdrv << 2) | (output.outne << 1);
+    data[1] = (mode & 0xE0) | (output.invrt << 4) | (output.och << 3) | (output.outdrv << 2) | output.outne;
 
     err += pca9685_i2c_hal_write(dev.i2c_addr, data, 2);
     return err;
@@ -195,9 +195,12 @@ int16_t pca9685_i2c_output_init(pca9685_dev_t dev, pca9685_output_t output)
  */
 int16_t pca9685_i2c_led_set(pca9685_dev_t dev, uint8_t led_no, pca9685_led_state_t state)
 {
+    if (led_no > 15)
+        return PCA9685_ERR;
+
     /* Calculate register address offset for the specific LED */
     uint8_t reg = (led_no * 4) + LED_OFFSET_ADR;
-    uint8_t data[5];
+    uint8_t data[5] = {0};
     data[0] = reg;
 
     /* Bit 4 in LEDn_ON_H sets the LED fully ON */
@@ -221,7 +224,7 @@ int16_t pca9685_i2c_led_set(pca9685_dev_t dev, uint8_t led_no, pca9685_led_state
 int16_t pca9685_i2c_all_led_set(pca9685_dev_t dev, pca9685_led_state_t state)
 {
     uint8_t reg = REG_ALL_LED;
-    uint8_t data[5];
+    uint8_t data[5] = {0};
     data[0] = reg;
     /* Set Full ON bit in ALL_LED_ON_H */
     data[2] = 1 << 4;
@@ -244,6 +247,9 @@ int16_t pca9685_i2c_all_led_set(pca9685_dev_t dev, pca9685_led_state_t state)
  */
 int16_t pca9685_i2c_led_pwm_set(pca9685_dev_t dev, uint8_t led_no, float d_cycle, float delay)
 {
+    if (led_no > 15)
+        return PCA9685_ERR;
+
     uint8_t reg = (led_no * 4) + LED_OFFSET_ADR;
     uint8_t data[5];
 
@@ -263,9 +269,9 @@ int16_t pca9685_i2c_led_pwm_set(pca9685_dev_t dev, uint8_t led_no, float d_cycle
 
     /* LED_OFF calculation. Handles wrapping if OFF time > 4096 */
     /* LED_OFF_L */
-    data[3] = led_off_tm > PWM_OUTPUT_COUNTER_MAX ? (PWM_OUTPUT_COUNTER_MAX - led_off_tm) & 0xFF : (led_off_tm - 1) & 0xFF;
+    data[3] = led_off_tm > PWM_OUTPUT_COUNTER_MAX ? (led_off_tm - PWM_OUTPUT_COUNTER_MAX - 1) & 0xFF : (led_off_tm - 1) & 0xFF;
     /* LED_OFF_H */
-    data[4] = led_off_tm > PWM_OUTPUT_COUNTER_MAX ? (PWM_OUTPUT_COUNTER_MAX - led_off_tm) >> 8 : (led_off_tm - 1) >> 8;
+    data[4] = led_off_tm > PWM_OUTPUT_COUNTER_MAX ? (led_off_tm - PWM_OUTPUT_COUNTER_MAX - 1) >> 8 : (led_off_tm - 1) >> 8;
 
     int16_t err = pca9685_i2c_hal_write(dev.i2c_addr, data, 5);
     return err;
@@ -286,9 +292,8 @@ int16_t pca9685_i2c_all_led_pwm_set(pca9685_dev_t dev, float d_cycle, float dela
     uint16_t led_on_tm = round(d_cycle * .01f * PWM_OUTPUT_COUNTER_MAX);
     uint16_t led_off_tm = delay_tm + led_on_tm;
 
-    /* The LEDn_ON and LEDn_OFF count registers should never be programmed with the same values */
-    if (led_on_tm == led_off_tm)
-        return PCA9685_ERR;
+    if(delay_tm == 0)
+        delay_tm = 1;
 
     data[0] = reg;
     /* ALL_LED_ON_L */
@@ -296,9 +301,9 @@ int16_t pca9685_i2c_all_led_pwm_set(pca9685_dev_t dev, float d_cycle, float dela
     /* ALL_LED_ON_H */
     data[2] = (delay_tm - 1) >> 8;
     /* ALL_LED_OFF_L (with wrap-around logic) */
-    data[3] = led_off_tm > PWM_OUTPUT_COUNTER_MAX ? (PWM_OUTPUT_COUNTER_MAX - led_off_tm) & 0xFF : (led_off_tm - 1) & 0xFF;
+    data[3] = led_off_tm > PWM_OUTPUT_COUNTER_MAX ? (led_off_tm - PWM_OUTPUT_COUNTER_MAX - 1) & 0xFF : (led_off_tm - 1) & 0xFF;
     /* ALL_LED_OFF_H (with wrap-around logic) */
-    data[4] = led_off_tm > PWM_OUTPUT_COUNTER_MAX ? (PWM_OUTPUT_COUNTER_MAX - led_off_tm) >> 8 : (led_off_tm - 1) >> 8;
+    data[4] = led_off_tm > PWM_OUTPUT_COUNTER_MAX ? (led_off_tm - PWM_OUTPUT_COUNTER_MAX - 1) >> 8 : (led_off_tm - 1) >> 8;
 
     int16_t err = pca9685_i2c_hal_write(dev.i2c_addr, data, 5);
     return err;
@@ -318,7 +323,13 @@ int16_t pca9685_i2c_write_pre_scale(pca9685_dev_t dev, double frequency, double 
     uint8_t data[2];
     data[0] = reg;
     /* Formula: prescale = round(osc_clock / (4096 * update_rate)) - 1 */
-    data[1] = round(osc_clk_hz / (PWM_OUTPUT_COUNTER_MAX * frequency)) - 1;
+    double pre_scale = round(osc_clk_hz / (PWM_OUTPUT_COUNTER_MAX * frequency)) - 1;
+    /* PRE_SCALE hardware range is 3..255 */
+    if (pre_scale < 3)
+        pre_scale = 3;
+    else if (pre_scale > 255)
+        pre_scale = 255;
+    data[1] = pre_scale;
     int16_t err = pca9685_i2c_hal_write(dev.i2c_addr, data, 2);
     return err;
 }
