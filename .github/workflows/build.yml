@@ -1,0 +1,71 @@
+# Cross-compiles the library for STM32F1 (Cortex-M3) against the official
+# ST HAL headers to catch build breaks and compiler warnings.
+name: Build (arm-none-eabi-gcc)
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    env:
+      CUBE: ${{ github.workspace }}/STM32CubeF1
+      BUILD: ${{ github.workspace }}/build
+    steps:
+      - uses: actions/checkout@v5
+
+      # STM32CubeF1 v1.8.7, pinned by commit
+      - uses: actions/checkout@v5
+        with:
+          repository: STMicroelectronics/STM32CubeF1
+          ref: d12e75247d5bcedc734f829b394517ab4c2726e3
+          path: STM32CubeF1
+
+      - name: Fetch HAL and CMSIS device submodules
+        working-directory: STM32CubeF1
+        run: |
+          git submodule update --init --depth 1 \
+            Drivers/STM32F1xx_HAL_Driver \
+            Drivers/CMSIS/Device/ST/STM32F1xx
+
+      - name: Install arm-none-eabi-gcc
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends gcc-arm-none-eabi libnewlib-arm-none-eabi
+          arm-none-eabi-gcc --version
+
+      - name: Prepare CubeMX-style main.h and HAL config
+        run: |
+          mkdir -p "$BUILD"
+          printf '#include "stm32f1xx_hal.h"\n' > "$BUILD/main.h"
+          cp "$CUBE/Drivers/STM32F1xx_HAL_Driver/Inc/stm32f1xx_hal_conf_template.h" \
+             "$BUILD/stm32f1xx_hal_conf.h"
+
+      - name: Compile
+        run: |
+          set -o pipefail
+          for src in *.c; do
+            arm-none-eabi-gcc -mcpu=cortex-m3 -mthumb -std=c11 -O2 \
+              -Wall -Wextra \
+              -DSTM32F103xB -DUSE_HAL_DRIVER \
+              -I. -I"$BUILD" \
+              -I"$CUBE/Drivers/STM32F1xx_HAL_Driver/Inc" \
+              -I"$CUBE/Drivers/CMSIS/Device/ST/STM32F1xx/Include" \
+              -I"$CUBE/Drivers/CMSIS/Include" \
+              -c "$src" -o "$BUILD/${src%.c}.o" 2>&1 | tee -a "$BUILD/warnings.log"
+          done
+          arm-none-eabi-ar rcs "$BUILD/libpca9685.a" "$BUILD"/*.o
+          arm-none-eabi-size "$BUILD"/*.o
+
+      - name: Warnings summary
+        if: always()
+        run: |
+          count=$(grep -c 'warning:' "$BUILD/warnings.log" || true)
+          echo "### arm-none-eabi-gcc: ${count:-0} warning(s)" >> "$GITHUB_STEP_SUMMARY"
+          if [ "${count:-0}" -gt 0 ]; then
+            { echo '```'; grep 'warning:' "$BUILD/warnings.log"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          fi
