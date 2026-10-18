@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  unit-tests:
+    name: Unit tests (${{ matrix.cc }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        cc: [gcc, clang]
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Build and run tests with ASan/UBSan
+        run: make -C test CC=${{ matrix.cc }}
+
+  arm-build:
+    name: Cross-compile for Cortex-M0/M3/M4F
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install arm-none-eabi-gcc
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            gcc-arm-none-eabi libnewlib-arm-none-eabi binutils-arm-none-eabi
+
+      - name: Build driver, STM32 HAL layer and examples
+        run: |
+          arm-none-eabi-gcc --version | head -n 1
+          make -C test arm
