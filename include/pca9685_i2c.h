@@ -151,6 +151,23 @@ typedef struct{
 #define SUBADR_OFFSET_ADR               0x01 /**< Offset for Sub-Address registers relative to register 0x02 */
 #define STAB_TIME                       1      /**< Oscillator stabilization wait time (ms) */
 #define PWM_OUTPUT_COUNTER_MAX          0x1000 /**< 12-bit counter max (4096 steps) */
+#define PCA9685_LED_COUNT               16     /**< Number of PWM channels */
+#define PCA9685_LED_FULL                0x1000 /**< Full ON/OFF flag (bit 4 of LEDn_ON_H / LEDn_OFF_H) */
+#define PCA9685_PRE_SCALE_MIN           3      /**< Lowest PRE_SCALE value allowed by hardware (~1526 Hz) */
+#define PCA9685_PRE_SCALE_MAX           255    /**< Highest PRE_SCALE value (~24 Hz) */
+#define PCA9685_INTERNAL_OSC_HZ         25000000.0 /**< Nominal internal oscillator frequency (Hz) */
+
+/**
+ * @brief MODE1 register bits
+ */
+#define PCA9685_MODE1_RESTART           0x80 /**< Bit 7: PWM restart pending / write 1 to restart */
+#define PCA9685_MODE1_EXTCLK            0x40 /**< Bit 6: Use EXTCLK pin clock (sticky) */
+#define PCA9685_MODE1_AI                0x20 /**< Bit 5: Register auto-increment */
+#define PCA9685_MODE1_SLEEP             0x10 /**< Bit 4: Low power mode, oscillator off */
+#define PCA9685_MODE1_SUB1              0x08 /**< Bit 3: Respond to Sub-Address 1 */
+#define PCA9685_MODE1_SUB2              0x04 /**< Bit 2: Respond to Sub-Address 2 */
+#define PCA9685_MODE1_SUB3              0x02 /**< Bit 1: Respond to Sub-Address 3 */
+#define PCA9685_MODE1_ALLCALL           0x01 /**< Bit 0: Respond to All Call address */
 
 /* -------------------------------------------------------------------------- */
 /* Function Prototypes                          */
@@ -189,7 +206,9 @@ int16_t pca9685_i2c_clock(pca9685_dev_t dev, pca9685_auto_extclk_t clk);
 int16_t pca9685_i2c_autoincrement(pca9685_dev_t dev, pca9685_auto_incr_t setting);
 
 /**
- * @brief Performs a Restart sequence to wake the device and resume PWM.
+ * @brief Wakes the device and, if the RESTART flag is set, resumes PWM.
+ * Follows the datasheet restart sequence: clear SLEEP, wait for the
+ * oscillator, then write 1 to RESTART.
  * @param dev The device structure.
  * @return PCA9685_OK on success.
  */
@@ -207,7 +226,7 @@ int16_t pca9685_i2c_sleep_mode(pca9685_dev_t dev, pca9685_sleep_mode_t sleep_mod
  * @brief Resets the device via I2C Software Reset (SWRST).
  * @return PCA9685_OK on success.
  */
-int16_t pca9685_i2c_reset();
+int16_t pca9685_i2c_reset(void);
 
 /**
  * @brief Initializes the Output configuration (MODE2 register).
@@ -219,15 +238,17 @@ int16_t pca9685_i2c_output_init(pca9685_dev_t dev, pca9685_output_t setting);
 
 /**
  * @brief Sets a specific LED channel to full ON or full OFF.
+ * @note Writes 4 registers in one transfer: auto-increment must be enabled.
  * @param dev The device structure.
  * @param led_no The LED channel number (0-15).
  * @param state State (ON/OFF).
- * @return PCA9685_OK on success.
+ * @return PCA9685_OK on success, PCA9685_ERR if led_no is out of range.
  */
 int16_t pca9685_i2c_led_set(pca9685_dev_t dev, uint8_t led_no, pca9685_led_state_t state);
 
 /**
  * @brief Sets ALL LED channels to full ON or full OFF.
+ * @note Writes 4 registers in one transfer: auto-increment must be enabled.
  * @param dev The device structure.
  * @param state State (ON/OFF).
  * @return PCA9685_OK on success.
@@ -236,16 +257,20 @@ int16_t pca9685_i2c_all_led_set(pca9685_dev_t dev, pca9685_led_state_t state);
 
 /**
  * @brief Sets PWM parameters for a specific LED channel.
+ * Values are clamped to 0-100. A duty cycle of 0 or 100 uses the
+ * full OFF / full ON bits, so the output is truly constant.
+ * @note Writes 4 registers in one transfer: auto-increment must be enabled.
  * @param dev The device structure.
  * @param led_no The LED channel number (0-15).
  * @param d_cycle Duty cycle percentage (0-100).
  * @param delay Phase delay percentage (0-100).
- * @return PCA9685_OK on success.
+ * @return PCA9685_OK on success, PCA9685_ERR if led_no is out of range.
  */
 int16_t pca9685_i2c_led_pwm_set(pca9685_dev_t dev, uint8_t led_no, float d_cycle, float delay);
 
 /**
  * @brief Sets PWM parameters for ALL LED channels.
+ * @note Writes 4 registers in one transfer: auto-increment must be enabled.
  * @param dev The device structure.
  * @param d_cycle Duty cycle percentage (0-100).
  * @param delay Phase delay percentage (0-100).
@@ -259,7 +284,8 @@ int16_t pca9685_i2c_all_led_pwm_set(pca9685_dev_t dev, float d_cycle, float dela
  * @param dev The device structure.
  * @param frequency Target frequency in Hz (e.g., 50.0).
  * @param osc_clk_hz Oscillator frequency (internal is ~25MHz).
- * @return PCA9685_OK on success.
+ * @return PCA9685_OK on success, PCA9685_ERR if the frequency cannot be
+ *         reached (PRE_SCALE outside 3-255, about 24-1526 Hz at 25 MHz).
  */
 int16_t pca9685_i2c_write_pre_scale(pca9685_dev_t dev, double frequency, double osc_clk_hz);
 
@@ -324,6 +350,19 @@ int16_t pca9685_i2c_sub_addr_resp(pca9685_dev_t dev, pca9685_subaddr_no_t sub_ad
 int16_t pca9685_i2c_allcall_address_resp(pca9685_dev_t dev, pca9685_addr_resp_t resp);
 
 /**
+ * @brief Sets a channel's pulse width in microseconds (servo control).
+ * Converts the pulse width to a duty cycle for the given PWM frequency,
+ * e.g. 1500 us at 50 Hz = 7.5 %.
+ * @note Writes 4 registers in one transfer: auto-increment must be enabled.
+ * @param dev The device structure.
+ * @param led_no The channel number (0-15).
+ * @param pulse_us Pulse width in microseconds (typically 1000-2000 for servos).
+ * @param pwm_freq_hz The PWM frequency configured with PRE_SCALE (e.g. 50.0).
+ * @return PCA9685_OK on success, PCA9685_ERR on invalid arguments.
+ */
+int16_t pca9685_i2c_servo_pulse_set(pca9685_dev_t dev, uint8_t led_no, float pulse_us, float pwm_freq_hz);
+
+/**
  * @brief Registers and initializes the device structure with address settings.
  * @note This function writes the address configuration to the device immediately.
  * @param dev Pointer to the device structure.
@@ -332,8 +371,9 @@ int16_t pca9685_i2c_allcall_address_resp(pca9685_dev_t dev, pca9685_addr_resp_t 
  * @param _sub_addr_1 Sub-Address 1 to set.
  * @param _sub_addr_2 Sub-Address 2 to set.
  * @param _sub_addr_3 Sub-Address 3 to set.
+ * @return PCA9685_OK on success.
  */
-void pca9685_i2c_register(pca9685_dev_t *dev,
+int16_t pca9685_i2c_register(pca9685_dev_t *dev,
                           uint8_t _i2c_addr,
                           uint8_t _allcall_addr,
                           uint8_t _sub_addr_1,

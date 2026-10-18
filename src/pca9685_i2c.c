@@ -1,7 +1,100 @@
-#include "math.h"
-
 #include "pca9685_i2c.h"
 #include "pca9685_i2c_hal.h"
+
+/**
+ * @brief Returns the LEDn_ON_L register address of a channel.
+ * @param led_no LED channel number (0-15).
+ * @return Register address.
+ */
+static uint8_t pca9685_led_reg(uint8_t led_no)
+{
+    return (uint8_t)(LED_OFFSET_ADR + (led_no * 4));
+}
+
+/**
+ * @brief Converts a percentage to 12-bit counter steps (0-4096).
+ * Out-of-range values (and NaN) are clamped to 0-100 %.
+ * @param percent Value in percent.
+ * @return Number of counter steps.
+ */
+static uint16_t pca9685_percent_to_counts(float percent)
+{
+    if(!(percent > 0.0f))
+        return 0;
+    if(percent >= 100.0f)
+        return PWM_OUTPUT_COUNTER_MAX;
+    /* Round to nearest step without pulling in libm */
+    return (uint16_t)(percent * (PWM_OUTPUT_COUNTER_MAX / 100.0f) + 0.5f);
+}
+
+/**
+ * @brief Writes the four ON/OFF registers starting at 'reg' in one transfer.
+ * Bit 12 of 'on'/'off' maps to the full ON/OFF bit (bit 4 of the _H register).
+ * @param dev The device structure.
+ * @param reg LEDn_ON_L or ALL_LED_ON_L register address.
+ * @param on Value for the ON registers.
+ * @param off Value for the OFF registers.
+ * @return Error code.
+ */
+static int16_t pca9685_i2c_write_led(pca9685_dev_t dev, uint8_t reg, uint16_t on, uint16_t off)
+{
+    uint8_t data[5];
+    data[0] = reg;
+    data[1] = (uint8_t)(on & 0xFF);   /* LEDn_ON_L */
+    data[2] = (uint8_t)(on >> 8);     /* LEDn_ON_H */
+    data[3] = (uint8_t)(off & 0xFF);  /* LEDn_OFF_L */
+    data[4] = (uint8_t)(off >> 8);    /* LEDn_OFF_H */
+
+    return pca9685_i2c_hal_write(dev.i2c_addr, data, 5);
+}
+
+/**
+ * @brief Writes a PWM duty cycle and phase delay to the four ON/OFF registers at 'reg'.
+ * The output goes high when the counter reaches ON and low when it reaches OFF,
+ * so OFF may wrap around past the end of the 4096-step period.
+ * @param dev The device structure.
+ * @param reg LEDn_ON_L or ALL_LED_ON_L register address.
+ * @param d_cycle Duty cycle in percent.
+ * @param delay Phase delay in percent.
+ * @return Error code.
+ */
+static int16_t pca9685_i2c_write_pwm(pca9685_dev_t dev, uint8_t reg, float d_cycle, float delay)
+{
+    uint16_t high_tm = pca9685_percent_to_counts(d_cycle);
+    uint16_t delay_tm = pca9685_percent_to_counts(delay) % PWM_OUTPUT_COUNTER_MAX;
+
+    /* ON and OFF must never hold the same value, use the full OFF / full ON bits instead */
+    if(high_tm == 0)
+        return pca9685_i2c_write_led(dev, reg, 0, PCA9685_LED_FULL);
+    if(high_tm >= PWM_OUTPUT_COUNTER_MAX)
+        return pca9685_i2c_write_led(dev, reg, PCA9685_LED_FULL, 0);
+
+    uint16_t led_off_tm = (uint16_t)((delay_tm + high_tm) % PWM_OUTPUT_COUNTER_MAX);
+    return pca9685_i2c_write_led(dev, reg, delay_tm, led_off_tm);
+}
+
+/**
+ * @brief Read-modify-write of the MODE1 register.
+ * The RESTART bit is always written as 0: writing back a set RESTART bit
+ * would restart the PWM channels, while writing 0 has no effect.
+ * @param dev The device structure.
+ * @param mask Bits to modify.
+ * @param value New value of the masked bits.
+ * @return Error code.
+ */
+static int16_t pca9685_i2c_update_mode_1(pca9685_dev_t dev, uint8_t mask, uint8_t value)
+{
+    uint8_t mode;
+
+    if(pca9685_i2c_read_mode_1(dev, &mode) != PCA9685_OK)
+        return PCA9685_ERR;
+
+    uint8_t data[2];
+    data[0] = REG_MODE_1;
+    data[1] = (uint8_t)(((mode & ~mask) | (value & mask)) & ~PCA9685_MODE1_RESTART);
+
+    return pca9685_i2c_hal_write(dev.i2c_addr, data, 2);
+}
 
 /**
  * @brief Reads the content of the MODE1 register.
@@ -34,27 +127,15 @@ int16_t pca9685_i2c_read_mode_2(pca9685_dev_t dev, uint8_t *mode)
 /**
  * @brief Configures the EXTCLK bit in the MODE1 register.
  * Used to switch between the internal 25MHz clock and an external clock source.
+ * Note: The device must be in sleep mode, and EXTCLK can only be cleared by a reset.
  * @param dev The device structure.
  * @param clk Clock setting (Auto or External).
  * @return Error code.
  */
 int16_t pca9685_i2c_clock(pca9685_dev_t dev, pca9685_auto_extclk_t clk)
 {
-    uint8_t reg = REG_MODE_1;
-    uint8_t mode;
-
-    /* Read current mode configuration */
-    if(pca9685_i2c_read_mode_1(dev, &mode) != PCA9685_OK)
-        return PCA9685_ERR;
-
-    uint8_t data[2];
-    data[0] = reg;
-    /* Mask out bit 6 (EXTCLK) then set it based on the 'clk' parameter */
-    /* 0xBF = 1011 1111 (Clears bit 6) */
-    data[1] = (mode & 0xBF) | (clk << 6);
-
-    int16_t err = pca9685_i2c_hal_write(dev.i2c_addr, data, 2);
-    return err;
+    return pca9685_i2c_update_mode_1(dev, PCA9685_MODE1_EXTCLK,
+                                     clk == PCA9685_CLK_EXTERNAL ? PCA9685_MODE1_EXTCLK : 0);
 }
 
 /**
@@ -66,20 +147,8 @@ int16_t pca9685_i2c_clock(pca9685_dev_t dev, pca9685_auto_extclk_t clk)
  */
 int16_t pca9685_i2c_autoincrement(pca9685_dev_t dev, pca9685_auto_incr_t setting)
 {
-    uint8_t reg = REG_MODE_1;
-    uint8_t mode;
-
-    if(pca9685_i2c_read_mode_1(dev, &mode) != PCA9685_OK)
-        return PCA9685_ERR;
-
-    uint8_t data[2];
-    data[0] = reg;
-    /* Mask out bit 5 (AI) then set it based on 'setting' */
-    /* 0xDF = 1101 1111 (Clears bit 5) */
-    data[1] = (mode & 0xDF) | (setting << 5);
-
-    int16_t err = pca9685_i2c_hal_write(dev.i2c_addr, data, 2);
-    return err;
+    return pca9685_i2c_update_mode_1(dev, PCA9685_MODE1_AI,
+                                     setting == PCA9685_AUTOINCR_ON ? PCA9685_MODE1_AI : 0);
 }
 
 /**
@@ -90,31 +159,30 @@ int16_t pca9685_i2c_autoincrement(pca9685_dev_t dev, pca9685_auto_incr_t setting
  */
 int16_t pca9685_i2c_restart(pca9685_dev_t dev)
 {
-    uint8_t reg = REG_MODE_1;
     uint8_t mode;
 
-    /* Read MODE1. Check if RESTART bit (bit 7) is set, implying a restart is pending/possible. */
-    if(pca9685_i2c_read_mode_1(dev, &mode) != PCA9685_OK && !(mode & (1 << 7)))
+    /* 1. Read MODE1. RESTART (bit 7) set means PWM was running before sleep. */
+    if(pca9685_i2c_read_mode_1(dev, &mode) != PCA9685_OK)
         return PCA9685_ERR;
 
+    uint8_t restart_pending = mode & PCA9685_MODE1_RESTART;
+
     uint8_t data[2];
-    data[0] = reg;
-    /* Clear the SLEEP bit (bit 4) to wake up the device */
-    data[1] = mode | (mode & ~(1 << 4));
-    int16_t err = pca9685_i2c_hal_write(dev.i2c_addr, data, 2);
+    data[0] = REG_MODE_1;
+    /* 2. Clear the SLEEP bit to start the oscillator (writing 0 to RESTART has no effect) */
+    data[1] = (uint8_t)(mode & ~(PCA9685_MODE1_SLEEP | PCA9685_MODE1_RESTART));
+    if(pca9685_i2c_hal_write(dev.i2c_addr, data, 2) != PCA9685_OK)
+        return PCA9685_ERR;
 
     /* Wait for oscillator to stabilize (typically 500us) */
     pca9685_i2c_hal_ms_delay(STAB_TIME);
 
-    /* Check MODE1 again */
-    if(pca9685_i2c_read_mode_1(dev, &mode) != PCA9685_OK)
-        return PCA9685_ERR;
+    if(!restart_pending)
+        return PCA9685_OK;
 
-    /* Write logic 1 to bit 7 to restart PWM channels */
-    data[1] = mode | (mode & (1 << 7));
-    err += pca9685_i2c_hal_write(dev.i2c_addr, data, 2);
-
-    return err;
+    /* 3. Write logic 1 to bit 7 to restart PWM channels */
+    data[1] |= PCA9685_MODE1_RESTART;
+    return pca9685_i2c_hal_write(dev.i2c_addr, data, 2);
 }
 
 /**
@@ -126,23 +194,14 @@ int16_t pca9685_i2c_restart(pca9685_dev_t dev)
  */
 int16_t pca9685_i2c_sleep_mode(pca9685_dev_t dev, pca9685_sleep_mode_t sleep_mode)
 {
-    uint8_t reg = REG_MODE_1;
-    uint8_t data[2];
-    uint8_t mode;
-
-    int16_t err = pca9685_i2c_read_mode_1(dev, &mode);
+    int16_t err = pca9685_i2c_update_mode_1(dev, PCA9685_MODE1_SLEEP,
+                                            sleep_mode == PCA9685_MODE_SLEEP ? PCA9685_MODE1_SLEEP : 0);
     if(err != PCA9685_OK)
         return err;
 
-    data[0] = reg;
-    /* Mask bit 4 (SLEEP) and set new state */
-    /* 0xEF = 1110 1111 */
-    data[1] = (mode & 0xEF) | (sleep_mode << 4);
-
-    err += pca9685_i2c_hal_write(dev.i2c_addr, data, 2);
     /* Allow time for stabilization if waking up */
     pca9685_i2c_hal_ms_delay(STAB_TIME);
-    return err;
+    return PCA9685_OK;
 }
 
 /**
@@ -150,7 +209,7 @@ int16_t pca9685_i2c_sleep_mode(pca9685_dev_t dev, pca9685_sleep_mode_t sleep_mod
  * This resets the PCA9685 to its power-up state.
  * @return Error code.
  */
-int16_t pca9685_i2c_reset()
+int16_t pca9685_i2c_reset(void)
 {
     uint8_t data = SWRST;
 
@@ -180,10 +239,13 @@ int16_t pca9685_i2c_output_init(pca9685_dev_t dev, pca9685_output_t output)
     data[0] = reg;
     /* Clear lower 5 bits (0xE0) and apply new configuration */
     /* Bit 4: INVRT, Bit 3: OCH, Bit 2: OUTDRV, Bit 1-0: OUTNE */
-    data[1] = (mode & 0xE0) | (output.invrt << 4) | (output.och << 3) | (output.outdrv << 2) | (output.outne << 1);
+    data[1] = (uint8_t)((mode & 0xE0) |
+                        ((output.invrt & 0x01) << 4) |
+                        ((output.och & 0x01) << 3) |
+                        ((output.outdrv & 0x01) << 2) |
+                        (output.outne & 0x03));
 
-    err += pca9685_i2c_hal_write(dev.i2c_addr, data, 2);
-    return err;
+    return pca9685_i2c_hal_write(dev.i2c_addr, data, 2);
 }
 
 /**
@@ -195,21 +257,13 @@ int16_t pca9685_i2c_output_init(pca9685_dev_t dev, pca9685_output_t output)
  */
 int16_t pca9685_i2c_led_set(pca9685_dev_t dev, uint8_t led_no, pca9685_led_state_t state)
 {
-    /* Calculate register address offset for the specific LED */
-    uint8_t reg = (led_no * 4) + LED_OFFSET_ADR;
-    uint8_t data[5];
-    data[0] = reg;
+    if(led_no >= PCA9685_LED_COUNT)
+        return PCA9685_ERR;
 
-    /* Bit 4 in LEDn_ON_H sets the LED fully ON */
-    data[2] = 1 << 4;
-
-    /* If requesting OFF, set Bit 4 in LEDn_OFF_H instead */
-    if (state == PCA9685_LED_OFF)
-        data[4] = 1 << 4;
-
-    /* Note: data[1] (ON_L) and data[3] (OFF_L) are effectively 0 here, which is fine for full ON/OFF */
-    int16_t err = pca9685_i2c_hal_write(dev.i2c_addr, data, 5);
-    return err;
+    /* Bit 4 in LEDn_ON_H sets the LED fully ON, bit 4 in LEDn_OFF_H fully OFF */
+    if(state == PCA9685_LED_ON)
+        return pca9685_i2c_write_led(dev, pca9685_led_reg(led_no), PCA9685_LED_FULL, 0);
+    return pca9685_i2c_write_led(dev, pca9685_led_reg(led_no), 0, PCA9685_LED_FULL);
 }
 
 /**
@@ -220,18 +274,9 @@ int16_t pca9685_i2c_led_set(pca9685_dev_t dev, uint8_t led_no, pca9685_led_state
  */
 int16_t pca9685_i2c_all_led_set(pca9685_dev_t dev, pca9685_led_state_t state)
 {
-    uint8_t reg = REG_ALL_LED;
-    uint8_t data[5];
-    data[0] = reg;
-    /* Set Full ON bit in ALL_LED_ON_H */
-    data[2] = 1 << 4;
-
-    /* If requesting OFF, set Full OFF bit in ALL_LED_OFF_H */
-    if (state == PCA9685_LED_OFF)
-        data[4] = 1 << 4;
-
-    int16_t err = pca9685_i2c_hal_write(dev.i2c_addr, data, 5);
-    return err;
+    if(state == PCA9685_LED_ON)
+        return pca9685_i2c_write_led(dev, REG_ALL_LED, PCA9685_LED_FULL, 0);
+    return pca9685_i2c_write_led(dev, REG_ALL_LED, 0, PCA9685_LED_FULL);
 }
 
 /**
@@ -244,31 +289,10 @@ int16_t pca9685_i2c_all_led_set(pca9685_dev_t dev, pca9685_led_state_t state)
  */
 int16_t pca9685_i2c_led_pwm_set(pca9685_dev_t dev, uint8_t led_no, float d_cycle, float delay)
 {
-    uint8_t reg = (led_no * 4) + LED_OFFSET_ADR;
-    uint8_t data[5];
+    if(led_no >= PCA9685_LED_COUNT)
+        return PCA9685_ERR;
 
-    /* Convert percentage to 12-bit counter value (0-4096) */
-    uint16_t delay_tm = round(delay * .01f * PWM_OUTPUT_COUNTER_MAX);
-    uint16_t led_on_tm = round(d_cycle * .01f * PWM_OUTPUT_COUNTER_MAX);
-    uint16_t led_off_tm = delay_tm + led_on_tm;
-
-    if(delay_tm == 0)
-        delay_tm = 1;
-
-    data[0] = reg;
-    /* LED_ON_L */
-    data[1] = (delay_tm - 1) & 0xFF;
-    /* LED_ON_H */
-    data[2] = (delay_tm - 1) >> 8;
-
-    /* LED_OFF calculation. Handles wrapping if OFF time > 4096 */
-    /* LED_OFF_L */
-    data[3] = led_off_tm > PWM_OUTPUT_COUNTER_MAX ? (PWM_OUTPUT_COUNTER_MAX - led_off_tm) & 0xFF : (led_off_tm - 1) & 0xFF;
-    /* LED_OFF_H */
-    data[4] = led_off_tm > PWM_OUTPUT_COUNTER_MAX ? (PWM_OUTPUT_COUNTER_MAX - led_off_tm) >> 8 : (led_off_tm - 1) >> 8;
-
-    int16_t err = pca9685_i2c_hal_write(dev.i2c_addr, data, 5);
-    return err;
+    return pca9685_i2c_write_pwm(dev, pca9685_led_reg(led_no), d_cycle, delay);
 }
 
 /**
@@ -280,28 +304,7 @@ int16_t pca9685_i2c_led_pwm_set(pca9685_dev_t dev, uint8_t led_no, float d_cycle
  */
 int16_t pca9685_i2c_all_led_pwm_set(pca9685_dev_t dev, float d_cycle, float delay)
 {
-    uint8_t reg = REG_ALL_LED;
-    uint8_t data[5];
-    uint16_t delay_tm = round(delay * .01f * PWM_OUTPUT_COUNTER_MAX);
-    uint16_t led_on_tm = round(d_cycle * .01f * PWM_OUTPUT_COUNTER_MAX);
-    uint16_t led_off_tm = delay_tm + led_on_tm;
-
-    /* The LEDn_ON and LEDn_OFF count registers should never be programmed with the same values */
-    if (led_on_tm == led_off_tm)
-        return PCA9685_ERR;
-
-    data[0] = reg;
-    /* ALL_LED_ON_L */
-    data[1] = (delay_tm - 1) & 0xFF;
-    /* ALL_LED_ON_H */
-    data[2] = (delay_tm - 1) >> 8;
-    /* ALL_LED_OFF_L (with wrap-around logic) */
-    data[3] = led_off_tm > PWM_OUTPUT_COUNTER_MAX ? (PWM_OUTPUT_COUNTER_MAX - led_off_tm) & 0xFF : (led_off_tm - 1) & 0xFF;
-    /* ALL_LED_OFF_H (with wrap-around logic) */
-    data[4] = led_off_tm > PWM_OUTPUT_COUNTER_MAX ? (PWM_OUTPUT_COUNTER_MAX - led_off_tm) >> 8 : (led_off_tm - 1) >> 8;
-
-    int16_t err = pca9685_i2c_hal_write(dev.i2c_addr, data, 5);
-    return err;
+    return pca9685_i2c_write_pwm(dev, REG_ALL_LED, d_cycle, delay);
 }
 
 /**
@@ -314,13 +317,18 @@ int16_t pca9685_i2c_all_led_pwm_set(pca9685_dev_t dev, float d_cycle, float dela
  */
 int16_t pca9685_i2c_write_pre_scale(pca9685_dev_t dev, double frequency, double osc_clk_hz)
 {
-    uint8_t reg = REG_PRE_SCALE;
-    uint8_t data[2];
-    data[0] = reg;
+    if(!(frequency > 0.0) || !(osc_clk_hz > 0.0))
+        return PCA9685_ERR;
+
     /* Formula: prescale = round(osc_clock / (4096 * update_rate)) - 1 */
-    data[1] = round(osc_clk_hz / (PWM_OUTPUT_COUNTER_MAX * frequency)) - 1;
-    int16_t err = pca9685_i2c_hal_write(dev.i2c_addr, data, 2);
-    return err;
+    double prescale = osc_clk_hz / (PWM_OUTPUT_COUNTER_MAX * frequency) - 1.0 + 0.5;
+    if(prescale < PCA9685_PRE_SCALE_MIN || prescale >= PCA9685_PRE_SCALE_MAX + 1)
+        return PCA9685_ERR;
+
+    uint8_t data[2];
+    data[0] = REG_PRE_SCALE;
+    data[1] = (uint8_t)prescale;
+    return pca9685_i2c_hal_write(dev.i2c_addr, data, 2);
 }
 
 /**
@@ -335,9 +343,12 @@ int16_t pca9685_i2c_read_pre_scale(pca9685_dev_t dev, double *frequency, double 
     uint8_t reg = REG_PRE_SCALE;
     uint8_t data;
     int16_t err = pca9685_i2c_hal_read(dev.i2c_addr, &reg, &data, 1);
+    if(err != PCA9685_OK)
+        return err;
+
     /* Reverse calculation of the formula */
     *frequency = (osc_clk_hz) / (PWM_OUTPUT_COUNTER_MAX * ((data) + 1));
-    return err;
+    return PCA9685_OK;
 }
 
 /**
@@ -353,7 +364,7 @@ int16_t pca9685_i2c_write_allcall_addr(pca9685_dev_t dev, uint8_t allcall_addr)
     uint8_t data[2];
     data[0] = reg;
     /* Shift left by 1 for I2C write format */
-    data[1] = allcall_addr << 1;
+    data[1] = (uint8_t)(allcall_addr << 1);
 
     int16_t err = pca9685_i2c_hal_write(dev.i2c_addr, data, 2);
     return err;
@@ -370,9 +381,11 @@ int16_t pca9685_i2c_read_allcall_addr(pca9685_dev_t dev, uint8_t *allcall_addr)
     uint8_t reg = REG_ALLCALLADR;
     uint8_t data;
     int16_t err = pca9685_i2c_hal_read(dev.i2c_addr, &reg, &data, 1);
-    *allcall_addr = data >> 1;
+    if(err != PCA9685_OK)
+        return err;
 
-    return err;
+    *allcall_addr = data >> 1;
+    return PCA9685_OK;
 }
 
 /**
@@ -384,10 +397,13 @@ int16_t pca9685_i2c_read_allcall_addr(pca9685_dev_t dev, uint8_t *allcall_addr)
  */
 int16_t pca9685_i2c_write_sub_addr(pca9685_dev_t dev, pca9685_subaddr_no_t addr_no, uint8_t sub_addr)
 {
-    uint8_t reg = addr_no + SUBADR_OFFSET_ADR;
+    if(addr_no < PCA9685_SUB_ADDR_1 || addr_no > PCA9685_SUB_ADDR_3)
+        return PCA9685_ERR;
+
+    uint8_t reg = (uint8_t)(addr_no + SUBADR_OFFSET_ADR);
     uint8_t data[2];
     data[0] = reg;
-    data[1] = sub_addr << 1;
+    data[1] = (uint8_t)(sub_addr << 1);
 
     int16_t err = pca9685_i2c_hal_write(dev.i2c_addr, data, 2);
     return err;
@@ -402,12 +418,17 @@ int16_t pca9685_i2c_write_sub_addr(pca9685_dev_t dev, pca9685_subaddr_no_t addr_
  */
 int16_t pca9685_i2c_read_sub_addr(pca9685_dev_t dev, pca9685_subaddr_no_t addr_no, uint8_t *sub_addr)
 {
-    uint8_t reg = addr_no + SUBADR_OFFSET_ADR;
+    if(addr_no < PCA9685_SUB_ADDR_1 || addr_no > PCA9685_SUB_ADDR_3)
+        return PCA9685_ERR;
+
+    uint8_t reg = (uint8_t)(addr_no + SUBADR_OFFSET_ADR);
     uint8_t data;
     int16_t err = pca9685_i2c_hal_read(dev.i2c_addr, &reg, &data, 1);
-    *sub_addr = data >> 1;
+    if(err != PCA9685_OK)
+        return err;
 
-    return err;
+    *sub_addr = data >> 1;
+    return PCA9685_OK;
 }
 
 /**
@@ -419,24 +440,12 @@ int16_t pca9685_i2c_read_sub_addr(pca9685_dev_t dev, pca9685_subaddr_no_t addr_n
  */
 int16_t pca9685_i2c_sub_addr_resp(pca9685_dev_t dev, pca9685_subaddr_no_t sub_addr, pca9685_addr_resp_t resp)
 {
-    uint8_t reg = REG_MODE_1;
-    uint8_t mode;
-    if(pca9685_i2c_read_mode_1(dev, &mode) != PCA9685_OK)
+    if(sub_addr < PCA9685_SUB_ADDR_1 || sub_addr > PCA9685_SUB_ADDR_3)
         return PCA9685_ERR;
 
-    /* Adjustment logic: Map enum values to correct MODE1 register bit positions */
     /* MODE1 bits: Bit 3 = SUB1, Bit 2 = SUB2, Bit 1 = SUB3 */
-    if(sub_addr == 1)
-        sub_addr = 3;
-    else if(sub_addr == 3)
-        sub_addr = 1;
-
-    uint8_t data[2];
-    data[0] = reg;
-    /* Modify the specific bit corresponding to the sub-address */
-    data[1] = (mode & ~(1 << sub_addr)) | (resp << sub_addr);
-    int16_t err = pca9685_i2c_hal_write(dev.i2c_addr, data, 2);
-    return err;
+    uint8_t bit = (uint8_t)(1 << (4 - sub_addr));
+    return pca9685_i2c_update_mode_1(dev, bit, resp == PCA9685_ADDR_RESPOND ? bit : 0);
 }
 
 /**
@@ -447,16 +456,27 @@ int16_t pca9685_i2c_sub_addr_resp(pca9685_dev_t dev, pca9685_subaddr_no_t sub_ad
  */
 int16_t pca9685_i2c_allcall_address_resp(pca9685_dev_t dev, pca9685_addr_resp_t resp)
 {
-    uint8_t reg = REG_MODE_1;
-    uint8_t mode;
-    if(pca9685_i2c_read_mode_1(dev, &mode) != PCA9685_OK)
-        return PCA9685_ERR;
-    uint8_t data[2];
-    data[0] = reg;
     /* Modify bit 0 (ALLCALL) of MODE1 */
-    data[1] = (mode & ~(1 << 0)) | resp;
-    int16_t err = pca9685_i2c_hal_write(dev.i2c_addr, data, 2);
-    return err;
+    return pca9685_i2c_update_mode_1(dev, PCA9685_MODE1_ALLCALL,
+                                     resp == PCA9685_ADDR_RESPOND ? PCA9685_MODE1_ALLCALL : 0);
+}
+
+/**
+ * @brief Sets a channel's pulse width in microseconds.
+ * @param dev The device structure.
+ * @param led_no Channel (0-15).
+ * @param pulse_us Pulse width in microseconds.
+ * @param pwm_freq_hz PWM frequency in Hz.
+ * @return Error code.
+ */
+int16_t pca9685_i2c_servo_pulse_set(pca9685_dev_t dev, uint8_t led_no, float pulse_us, float pwm_freq_hz)
+{
+    if(!(pwm_freq_hz > 0.0f) || !(pulse_us >= 0.0f))
+        return PCA9685_ERR;
+
+    /* duty [%] = pulse / period * 100 = pulse_us * f / 10^6 * 100 */
+    float d_cycle = pulse_us * pwm_freq_hz / 10000.0f;
+    return pca9685_i2c_led_pwm_set(dev, led_no, d_cycle, 0.0f);
 }
 
 /**
@@ -467,13 +487,14 @@ int16_t pca9685_i2c_allcall_address_resp(pca9685_dev_t dev, pca9685_addr_resp_t 
  * @param _sub_addr_1 Sub-address 1.
  * @param _sub_addr_2 Sub-address 2.
  * @param _sub_addr_3 Sub-address 3.
+ * @return Error code.
  */
-void pca9685_i2c_register(pca9685_dev_t *dev,
-                          uint8_t _i2c_addr,
-                          uint8_t _allcall_addr,
-                          uint8_t _sub_addr_1,
-                          uint8_t _sub_addr_2,
-                          uint8_t _sub_addr_3){
+int16_t pca9685_i2c_register(pca9685_dev_t *dev,
+                             uint8_t _i2c_addr,
+                             uint8_t _allcall_addr,
+                             uint8_t _sub_addr_1,
+                             uint8_t _sub_addr_2,
+                             uint8_t _sub_addr_3){
 
     dev->i2c_addr = _i2c_addr;
     dev->allcall_addr = _allcall_addr;
@@ -482,8 +503,11 @@ void pca9685_i2c_register(pca9685_dev_t *dev,
     dev->sub_addr_3 = _sub_addr_3;
 
     /* Program the configuration to the device */
-    pca9685_i2c_write_allcall_addr(*dev, dev->allcall_addr);
-    pca9685_i2c_write_sub_addr(*dev, PCA9685_SUB_ADDR_1, dev->sub_addr_1);
-    pca9685_i2c_write_sub_addr(*dev, PCA9685_SUB_ADDR_2, dev->sub_addr_2);
-    pca9685_i2c_write_sub_addr(*dev, PCA9685_SUB_ADDR_3, dev->sub_addr_3);
+    if(pca9685_i2c_write_allcall_addr(*dev, dev->allcall_addr) != PCA9685_OK ||
+       pca9685_i2c_write_sub_addr(*dev, PCA9685_SUB_ADDR_1, dev->sub_addr_1) != PCA9685_OK ||
+       pca9685_i2c_write_sub_addr(*dev, PCA9685_SUB_ADDR_2, dev->sub_addr_2) != PCA9685_OK ||
+       pca9685_i2c_write_sub_addr(*dev, PCA9685_SUB_ADDR_3, dev->sub_addr_3) != PCA9685_OK)
+        return PCA9685_ERR;
+
+    return PCA9685_OK;
 }
