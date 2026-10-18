@@ -16,10 +16,10 @@ jobs:
       CUBE: ${{ github.workspace }}/STM32CubeF1
       BUILD: ${{ github.workspace }}/build
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # STM32CubeF1 v1.8.7, pinned by commit
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           repository: STMicroelectronics/STM32CubeF1
           ref: d12e75247d5bcedc734f829b394517ab4c2726e3
@@ -35,7 +35,7 @@ jobs:
       - name: Install arm-none-eabi-gcc
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends gcc-arm-none-eabi
+          sudo apt-get install -y --no-install-recommends gcc-arm-none-eabi libnewlib-arm-none-eabi
           arm-none-eabi-gcc --version
 
       - name: Prepare CubeMX-style main.h and HAL config
