@@ -5,7 +5,7 @@
 extern "C" {
 #endif
 
-#include "stdint.h"
+#include <stdint.h>
 
 /**
  * @brief Error code definition for failed operations.
@@ -23,7 +23,7 @@ extern "C" {
  * before I2C communication can occur (e.g., checking handles, GPIO setup).
  * * @return PCA9685_OK on success, or PCA9685_ERR on failure.
  */
-int16_t pca9685_i2c_hal_init();
+int16_t pca9685_i2c_hal_init(void);
 
 /**
  * @brief User-implemented I2C read function.

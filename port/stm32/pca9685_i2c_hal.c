@@ -8,8 +8,15 @@
  *
  * We declare it here as 'extern' to grant this driver access to the 
  * initialized I2C peripheral handle.
+ *
+ * To use another peripheral, define PCA9685_I2C_HANDLE in the compiler
+ * settings (e.g. -DPCA9685_I2C_HANDLE=hi2c2) instead of editing this file.
  */
-extern I2C_HandleTypeDef hi2c1;
+#ifndef PCA9685_I2C_HANDLE
+#define PCA9685_I2C_HANDLE hi2c1
+#endif
+
+extern I2C_HandleTypeDef PCA9685_I2C_HANDLE;
 
 // Define a timeout for I2C operations in milliseconds
 #define I2C_TIMEOUT 100 // 100 ms
@@ -23,10 +30,10 @@ extern I2C_HandleTypeDef hi2c1;
  * * This function performs a sanity check to ensure the handle is valid.
  * * @return PCA9685_OK if the I2C handle is valid, PCA9685_ERR otherwise.
  */
-int16_t pca9685_i2c_hal_init()
+int16_t pca9685_i2c_hal_init(void)
 {
     // Verify that the I2C1 instance has been populated/initialized
-    if (hi2c1.Instance == NULL)
+    if (PCA9685_I2C_HANDLE.Instance == NULL)
     {
         return PCA9685_ERR;
     }
@@ -53,7 +60,7 @@ int16_t pca9685_i2c_hal_read(uint8_t address, uint8_t *reg, uint8_t *data, uint1
 
     // 1. Transmit the target register address to the device.
     // The STM32 HAL expects the device address to be shifted left by 1 bit.
-    status = HAL_I2C_Master_Transmit(&hi2c1, (address << 1), reg, 1, I2C_TIMEOUT);
+    status = HAL_I2C_Master_Transmit(&PCA9685_I2C_HANDLE, (address << 1), reg, 1, I2C_TIMEOUT);
 
     if (status != HAL_OK)
     {
@@ -63,7 +70,7 @@ int16_t pca9685_i2c_hal_read(uint8_t address, uint8_t *reg, uint8_t *data, uint1
     // 2. Receive 'count' bytes of data from the device starting at the register address sent above.
     // The STM32 HAL handles the Repeated Start condition implicitly or via specific flags if needed,
     // though Master_Receive after Master_Transmit is standard for register reading.
-    status = HAL_I2C_Master_Receive(&hi2c1, (address << 1), data, count, I2C_TIMEOUT);
+    status = HAL_I2C_Master_Receive(&PCA9685_I2C_HANDLE, (address << 1), data, count, I2C_TIMEOUT);
 
     if (status == HAL_OK)
     {
@@ -89,7 +96,7 @@ int16_t pca9685_i2c_hal_read(uint8_t address, uint8_t *reg, uint8_t *data, uint1
 int16_t pca9685_i2c_hal_write(uint8_t address, uint8_t *data, uint16_t count)
 {
     // The STM32 HAL expects the device address to be shifted left by 1 bit.
-    if (HAL_I2C_Master_Transmit(&hi2c1, (address << 1), data, count, I2C_TIMEOUT) == HAL_OK)
+    if (HAL_I2C_Master_Transmit(&PCA9685_I2C_HANDLE, (address << 1), data, count, I2C_TIMEOUT) == HAL_OK)
     {
         return PCA9685_OK;
     }

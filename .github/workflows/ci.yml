@@ -1,0 +1,83 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  unit-tests:
+    name: Unit tests (${{ matrix.compiler }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - compiler: gcc
+            sanitize: "ON"
+          - compiler: clang
+            sanitize: "OFF"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_C_COMPILER=${{ matrix.compiler }} -DPCA9685_SANITIZE=${{ matrix.sanitize }}
+
+      - name: Build
+        run: cmake --build build
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure --verbose
+
+  cross-compile:
+    name: Cross-compile (${{ matrix.cpu }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - cpu: cortex-m0plus
+            flags: -mcpu=cortex-m0plus
+          - cpu: cortex-m3
+            flags: -mcpu=cortex-m3
+          - cpu: cortex-m4
+            flags: -mcpu=cortex-m4 -mfloat-abi=hard -mfpu=fpv4-sp-d16
+          - cpu: cortex-m7
+            flags: -mcpu=cortex-m7 -mfloat-abi=hard -mfpu=fpv5-d16
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Arm GNU toolchain
+        run: sudo apt-get update && sudo apt-get install -y gcc-arm-none-eabi
+
+      - name: Build driver
+        run: |
+          arm-none-eabi-gcc ${{ matrix.flags }} -mthumb -Os -std=c99 \
+            -Wall -Wextra -Wpedantic -Wshadow -Wconversion -Wdouble-promotion -Werror \
+            -Iinclude -c src/pca9685_i2c.c -o pca9685_i2c.o
+
+      - name: Code size
+        run: |
+          echo "### ${{ matrix.cpu }}" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          arm-none-eabi-size pca9685_i2c.o | tee -a "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+  static-analysis:
+    name: Static analysis (cppcheck)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install cppcheck
+        run: sudo apt-get update && sudo apt-get install -y cppcheck
+
+      - name: Run cppcheck
+        run: |
+          cppcheck --enable=warning,style,performance,portability --std=c99 \
+            --error-exitcode=1 --inline-suppr \
+            --suppress=missingIncludeSystem --suppress=missingInclude \
+            -I include src port examples tests/sim
