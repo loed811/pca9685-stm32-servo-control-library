@@ -32,7 +32,7 @@ static pca9685_dev_t pca9685;
 static const uint8_t servo_channel[SERVO_COUNT] = { 0, 1, 2, 3 };
 
 /* Phase delay of each channel in percent of the period (5% = 1 ms).
- * Keep delay + duty cycle below 100%. */
+ * If delay + duty cycle exceed 100% the pulse wraps into the next period. */
 static const float servo_delay[SERVO_COUNT] = { 0.0f, 5.0f, 10.0f, 15.0f };
 
 static int16_t pca9685_servo_init(void)
@@ -43,12 +43,12 @@ static int16_t pca9685_servo_init(void)
         return PCA9685_ERR;
 
     err |= pca9685_i2c_reset();
-    pca9685_i2c_register(&pca9685,
-                         I2C_ADDRESS_PCA9685,
-                         I2C_ALL_CALL_ADDRESS_PCA9685,
-                         I2C_SUB_ADDRESS_1_PCA9685,
-                         I2C_SUB_ADDRESS_2_PCA9685,
-                         I2C_SUB_ADDRESS_3_PCA9685);
+    err |= pca9685_i2c_register(&pca9685,
+                                I2C_ADDRESS_PCA9685,
+                                I2C_ALL_CALL_ADDRESS_PCA9685,
+                                I2C_SUB_ADDRESS_1_PCA9685,
+                                I2C_SUB_ADDRESS_2_PCA9685,
+                                I2C_SUB_ADDRESS_3_PCA9685);
     err |= pca9685_i2c_autoincrement(pca9685, PCA9685_AUTOINCR_ON);
 
     err |= pca9685_i2c_sleep_mode(pca9685, PCA9685_MODE_SLEEP);

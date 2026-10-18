@@ -17,17 +17,20 @@ The core logic (`pca9685_i2c.c/.h`) is separate from the hardware layer (`pca968
 - [API reference](#api-reference)
 - [Examples](#examples)
 - [Troubleshooting](#troubleshooting)
+- [Tests](#tests)
 - [Porting to other platforms](#porting-to-other-platforms)
 - [License](#license)
 
 ## Features
 
 - **Full control**: access to the MODE1 and MODE2 registers, sub-addresses and All-Call.
-- **Precision PWM**: helper functions take the duty cycle and phase delay as percentages (0.0 – 100.0 %).
+- **Precision PWM**: helper functions take the duty cycle and phase delay as percentages (0.0 – 100.0 %). Out-of-range values are clamped, and 0 % / 100 % are exact.
 - **Frequency control**: easy PRE_SCALE configuration (e.g. 50 Hz for servos).
 - **Power management**: sleep, wake and restart sequences.
 - **Hardware abstraction layer**: driver logic is kept apart from the I2C hardware calls.
-- **STM32 ready**: includes a default HAL implementation for STM32 using the HAL library (`hi2c1`).
+- **STM32 ready**: includes a default HAL implementation for STM32 using the HAL library (`hi2c1` by default, configurable).
+- **Tested**: host unit tests against a model of the chip, plus a Cortex-M0/M3/M4F build check, run in GitHub Actions on every push.
+- **No libm**: the driver does not need the math library.
 
 ## Files
 
@@ -35,8 +38,9 @@ The core logic (`pca9685_i2c.c/.h`) is separate from the hardware layer (`pca968
 |------|---------|
 | `pca9685_i2c.h` / `pca9685_i2c.c` | Driver: types, register map, all device functions |
 | `pca9685_i2c_hal.h` | Interface the driver needs from the platform (init/read/write/delay) |
-| `pca9685_i2c_hal.c` | STM32 HAL implementation of that interface (uses `hi2c1`, 100 ms timeout) |
+| `pca9685_i2c_hal.c` | STM32 HAL implementation of that interface (uses `hi2c1` unless `PCA9685_I2C_HANDLE` is defined, 100 ms timeout) |
 | `examples/` | Copy-paste snippets for a CubeMX `main.c` |
+| `test/` | Host unit tests with a mock I2C layer, and the cross-compile check (see [Tests](#tests)) |
 
 ## Wiring
 
@@ -74,9 +78,8 @@ Typical setup: an STM32 board (e.g. Nucleo / Blue Pill) and a common PCA9685 bre
 4. (Optional) Configure one GPIO as **Output, initial level High** for OE.
 5. Generate the code. CubeMX creates `I2C_HandleTypeDef hi2c1;` and calls `MX_I2C1_Init()` in `main()`.
 6. Copy `pca9685_i2c.c` and `pca9685_i2c_hal.c` to `Core/Src`, and `pca9685_i2c.h` and `pca9685_i2c_hal.h` to `Core/Inc`.
-7. **Different I2C handle?** If you use I2C2/I2C3, edit `pca9685_i2c_hal.c` and replace `hi2c1` (the `extern` declaration and its uses) with your handle, e.g. `hi2c2`.
-8. The driver uses `round()` from `<math.h>`. If the linker reports `undefined reference to 'round'`, add `m` to *Project → Properties → C/C++ Build → Settings → MCU GCC Linker → Libraries*.
-9. Call the driver **after** `MX_I2C1_Init()`.
+7. **Different I2C handle?** If you use I2C2/I2C3, define `PCA9685_I2C_HANDLE` as your handle instead of editing the file: *Project → Properties → C/C++ Build → Settings → MCU GCC Compiler → Preprocessor*, add `PCA9685_I2C_HANDLE=hi2c2`.
+8. Call the driver **after** `MX_I2C1_Init()`.
 
 ## Minimal usage example
 
@@ -151,7 +154,7 @@ One PWM step is 20 ms / 4096 ≈ 4.9 µs. Check your servo's datasheet for its e
 
 ## API reference
 
-All functions are declared in `pca9685_i2c.h` (driver) and `pca9685_i2c_hal.h` (platform layer). Unless stated otherwise, they return `int16_t`: `PCA9685_OK` (0) on success, otherwise non-zero (`PCA9685_ERR` = −1; functions that do several transfers can return the sum of errors, so test with `!= PCA9685_OK`).
+All functions are declared in `pca9685_i2c.h` (driver) and `pca9685_i2c_hal.h` (platform layer). They return `int16_t`: `PCA9685_OK` (0) on success, `PCA9685_ERR` (−1) on failure. A failure is an I2C error (no ACK, timeout) or an invalid argument such as a channel above 15 or an unknown enum value; invalid arguments are rejected before anything is sent. Read functions leave their output untouched when they fail.
 
 ### Device structure and constants
 
@@ -178,11 +181,11 @@ typedef struct {
 
 | Function | Description |
 |----------|-------------|
-| `void pca9685_i2c_register(pca9685_dev_t *dev, uint8_t i2c_addr, uint8_t allcall_addr, uint8_t sub_addr_1, uint8_t sub_addr_2, uint8_t sub_addr_3)` | Fills `*dev` and immediately writes the All-Call address and sub-addresses 1–3 to the chip. Returns nothing (errors are not reported). |
+| `int16_t pca9685_i2c_register(pca9685_dev_t *dev, uint8_t i2c_addr, uint8_t allcall_addr, uint8_t sub_addr_1, uint8_t sub_addr_2, uint8_t sub_addr_3)` | Fills `*dev` and immediately writes the All-Call address and sub-addresses 1–3 to the chip. Returns `PCA9685_ERR` if `dev` is NULL, an address does not fit in 7 bits, or a write fails. |
 | `int16_t pca9685_i2c_reset(void)` | Sends the software-reset byte `SWRST` (0x06) to the General Call address 0x00, then waits 1 ms. This resets **every** PCA9685 on the bus to power-up defaults: sleep on, auto-increment off, All-Call on, default addresses. |
-| `int16_t pca9685_i2c_sleep_mode(pca9685_dev_t dev, pca9685_sleep_mode_t mode)` | `PCA9685_MODE_SLEEP` turns the oscillator off (PWM stops, registers still accessible). `PCA9685_MODE_NORMAL` turns it on. Waits 1 ms afterwards. |
-| `int16_t pca9685_i2c_restart(pca9685_dev_t dev)` | Restart sequence: rewrites MODE1, waits for the oscillator, then writes MODE1 again so a pending RESTART bit resumes the previous PWM. Call it after waking with `pca9685_i2c_sleep_mode(..., PCA9685_MODE_NORMAL)`. |
-| `int16_t pca9685_i2c_clock(pca9685_dev_t dev, pca9685_auto_extclk_t clk)` | `PCA9685_CLK_INTERNAL` (25 MHz, default) or `PCA9685_CLK_EXTERNAL` (EXTCLK pin). Per the datasheet, EXTCLK can only be set while in sleep, and only a power cycle or reset clears it. |
+| `int16_t pca9685_i2c_sleep_mode(pca9685_dev_t dev, pca9685_sleep_mode_t mode)` | `PCA9685_MODE_SLEEP` turns the oscillator off (PWM stops, registers still accessible). `PCA9685_MODE_NORMAL` turns it on and waits 1 ms for it to settle. A pending restart is kept, so call `pca9685_i2c_restart()` next. |
+| `int16_t pca9685_i2c_restart(pca9685_dev_t dev)` | Datasheet restart sequence: clears SLEEP, waits for the oscillator, then writes 1 to the RESTART bit so channels that ran before sleep resume. Call it after `pca9685_i2c_sleep_mode(..., PCA9685_MODE_NORMAL)`, or on its own to wake and restart in one call. |
+| `int16_t pca9685_i2c_clock(pca9685_dev_t dev, pca9685_auto_extclk_t clk)` | `PCA9685_CLK_INTERNAL` (25 MHz, default) or `PCA9685_CLK_EXTERNAL` (EXTCLK pin). For EXTERNAL the function sets SLEEP first and then SLEEP + EXTCLK, as the datasheet requires, and leaves the chip asleep. Only a power cycle or reset switches back to the internal clock. |
 | `int16_t pca9685_i2c_autoincrement(pca9685_dev_t dev, pca9685_auto_incr_t setting)` | `PCA9685_AUTOINCR_ON` / `_OFF`. **Must be ON** before using `pca9685_i2c_led_pwm_set`, `pca9685_i2c_led_set`, `pca9685_i2c_all_led_set` and `pca9685_i2c_all_led_pwm_set`, which write 4 registers in one transfer. |
 | `int16_t pca9685_i2c_output_init(pca9685_dev_t dev, pca9685_output_t setting)` | Configures MODE2 from a `pca9685_output_t` (see below). |
 | `int16_t pca9685_i2c_read_mode_1(pca9685_dev_t dev, uint8_t *mode)` | Reads the raw MODE1 register. |
@@ -201,15 +204,15 @@ typedef struct {
 
 | Function | Description |
 |----------|-------------|
-| `int16_t pca9685_i2c_write_pre_scale(pca9685_dev_t dev, double frequency, double osc_clk_hz)` | Writes `PRE_SCALE = round(osc_clk_hz / (4096 × frequency)) − 1`. **The device must be in SLEEP mode.** Valid range is roughly 24 Hz to 1526 Hz with the 25 MHz internal clock. For 50 Hz at 25 MHz, the prescale value is 121. |
+| `int16_t pca9685_i2c_write_pre_scale(pca9685_dev_t dev, double frequency, double osc_clk_hz)` | Writes `PRE_SCALE = round(osc_clk_hz / (4096 × frequency)) − 1`, clamped to the hardware range 3–255. **The device must be in SLEEP mode**: the chip ignores this write while running. Valid range is roughly 24 Hz to 1526 Hz with the 25 MHz internal clock. For 50 Hz at 25 MHz, the prescale value is 121. Returns `PCA9685_ERR` if `frequency` or `osc_clk_hz` is not a positive number. |
 | `int16_t pca9685_i2c_read_pre_scale(pca9685_dev_t dev, double *frequency, double osc_clk_hz)` | Reads PRE_SCALE and computes the resulting frequency `osc_clk_hz / (4096 × (PRE_SCALE + 1))`. |
 
 ### PWM outputs (channels 0–15)
 
 | Function | Description |
 |----------|-------------|
-| `int16_t pca9685_i2c_led_pwm_set(pca9685_dev_t dev, uint8_t led_no, float d_cycle, float delay)` | Sets channel `led_no` (0–15) to a `d_cycle` % high time, starting `delay` % into the period. Both values are percentages, 0.0–100.0. Use `delay = 0` for servos, or stagger it per channel to spread current peaks. Keep `d_cycle + delay ≤ 100`. Needs auto-increment ON. |
-| `int16_t pca9685_i2c_all_led_pwm_set(pca9685_dev_t dev, float d_cycle, float delay)` | Same, for all 16 channels at once (ALL_LED registers). In the current implementation it returns `PCA9685_ERR` when `delay` is 0, so pass a small non-zero delay, or call `pca9685_i2c_led_pwm_set` for each channel. |
+| `int16_t pca9685_i2c_led_pwm_set(pca9685_dev_t dev, uint8_t led_no, float d_cycle, float delay)` | Sets channel `led_no` (0–15) to a `d_cycle` % high time, starting `delay` % into the period. Both values are percentages; anything outside 0.0–100.0 (or NaN) is clamped, so a bad value can never turn into a long pulse. 0 % and 100 % use the chip's full OFF / full ON bits. Use `delay = 0` for servos, or stagger it per channel to spread current peaks. If `d_cycle + delay` exceeds 100, the pulse wraps into the start of the next period. Needs auto-increment ON. |
+| `int16_t pca9685_i2c_all_led_pwm_set(pca9685_dev_t dev, float d_cycle, float delay)` | Same, for all 16 channels at once (ALL_LED registers). |
 | `int16_t pca9685_i2c_led_set(pca9685_dev_t dev, uint8_t led_no, pca9685_led_state_t state)` | Sets a channel fully ON or fully OFF without PWM (`PCA9685_LED_ON` / `PCA9685_LED_OFF`). Not useful for servos: a constant-high signal is not a valid servo pulse. |
 | `int16_t pca9685_i2c_all_led_set(pca9685_dev_t dev, pca9685_led_state_t state)` | Same, for all channels. `PCA9685_LED_OFF` is a quick way to make every output stop sending pulses. |
 
@@ -232,7 +235,7 @@ To send a command to every chip that answers on the All-Call address, build a se
 
 | Function | Description |
 |----------|-------------|
-| `int16_t pca9685_i2c_hal_init(void)` | STM32 version: returns `PCA9685_ERR` if `hi2c1.Instance` is NULL (I2C not initialised). It does not configure the hardware; CubeMX's `MX_I2C1_Init()` does that. |
+| `int16_t pca9685_i2c_hal_init(void)` | STM32 version: returns `PCA9685_ERR` if the handle's `Instance` is NULL (I2C not initialised). It does not configure the hardware; CubeMX's `MX_I2C1_Init()` does that. The handle is `hi2c1` unless `PCA9685_I2C_HANDLE` is defined. |
 | `int16_t pca9685_i2c_hal_read(uint8_t address, uint8_t *reg, uint8_t *data, uint16_t count)` | Writes the 1-byte register address, then reads `count` bytes. `address` is 7-bit; the STM32 implementation shifts it left by 1. |
 | `int16_t pca9685_i2c_hal_write(uint8_t address, uint8_t *data, uint16_t count)` | Writes `count` bytes; `data[0]` is the register address. |
 | `void pca9685_i2c_hal_ms_delay(uint32_t ms)` | Blocking delay (`HAL_Delay` on STM32). |
@@ -250,7 +253,7 @@ The examples are fragments of a CubeMX-generated `main.c`. Copy each `USER CODE 
 
 **Every call returns `PCA9685_ERR` / nothing moves**
 - Check the address. 0x40 is the 7-bit default; soldered A0–A5 jumpers change it. The driver takes the **7-bit** address and the STM32 HAL layer shifts it, so don't pass 0x80. To scan the bus, call `HAL_I2C_IsDeviceReady(&hi2c1, addr << 1, 2, 10)` for `addr` = 0x03 to 0x77 and print the addresses that answer `HAL_OK`.
-- Check that `MX_I2C1_Init()` runs before the driver and that the handle in `pca9685_i2c_hal.c` matches yours (`hi2c1`, `hi2c2`, …).
+- Check that `MX_I2C1_Init()` runs before the driver and that the driver uses your handle (`hi2c1` by default; define `PCA9685_I2C_HANDLE` for `hi2c2`, …).
 - SDA and SCL may be swapped, or the pull-ups may be missing. Without pull-ups the bus lines stay low and HAL reports `HAL_BUSY` or timeouts.
 - VCC must be powered. V+ alone does not power the chip's logic.
 - If the STM32 HAL I2C locks up in `HAL_BUSY` after a glitch, power-cycle the board. Some STM32F1 parts also need the documented I2C "busy flag" errata workaround.
@@ -272,8 +275,17 @@ The examples are fragments of a CubeMX-generated `main.c`. Copy each `USER CODE 
 **Servo jumps at power-up**
 - The outputs are active before the firmware has configured them. Wire OE to a GPIO that starts high, then drive it low once the PWM is set, or set the first position before waking the chip.
 
-**`undefined reference to 'round'`**
-- Link the math library (`-lm`, or add `m` in the CubeIDE linker libraries).
+## Tests
+
+The driver logic is tested on a PC, without hardware. `test/mock_hal.c` replaces the I2C layer with a small model of the PCA9685 (registers, auto-increment, the MODE1 SLEEP/RESTART/EXTCLK rules and PRE_SCALE write protection), and `test/test_pca9685.c` checks the exact bytes each function sends.
+
+```sh
+make -C test            # build and run the unit tests (gcc, ASan + UBSan)
+make -C test CC=clang   # same with clang
+make -C test arm        # compile driver, STM32 HAL layer and examples for Cortex-M0/M3/M4F
+```
+
+`make arm` needs `arm-none-eabi-gcc` and compiles the STM32 files against a minimal stand-in for `main.h` (`test/stm32_stub/`). GitHub Actions runs both on every push and pull request.
 
 ## Porting to other platforms
 
